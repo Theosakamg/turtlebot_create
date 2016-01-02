@@ -26,6 +26,7 @@
 # for consistency ROS Python coding guidelines.
 
 from __future__ import with_statement
+from abc import ABCMeta, abstractmethod
 
 """iRobot Roomba Serial control Interface (SCI) and Turtlebot Open Interface (OI).
 
@@ -48,6 +49,7 @@ __author__ = "damonkohler@gmail.com (Damon Kohler)"
 import logging
 import math
 import serial
+import socket
 import struct
 import time
 import threading
@@ -202,14 +204,15 @@ assert struct.calcsize('H') == 2, 'Expecting 2-byte shorts.'
 class DriverError(Exception):
   pass
 
-class SerialCommandInterface(object):
+class BaseCommandInterface(object):
+  __metaclass__ = ABCMeta
 
   """A higher-level wrapper around PySerial specifically designed for use with
   iRobot's SCI.
 
   """
   def __init__(self, tty, baudrate):
-    self.ser = serial.Serial(tty, baudrate=baudrate, timeout=SERIAL_TIMEOUT)
+    logging.debug('Connect to Command interface.')
     self.wake()
     self.opcodes = {}
 
@@ -219,42 +222,29 @@ class SerialCommandInterface(object):
 
   def wake(self):
     """wake up robot."""
-    self.ser.setRTS(0)
-    time.sleep(0.1)
-    self.ser.setRTS(1)
-    time.sleep(0.75)  # Technically it should wake after 500ms.
-    for i in range(3):
-      self.ser.setRTS(0)
-      time.sleep(0.25)
-      self.ser.setRTS(1)
-      time.sleep(0.25) 
+    logging.debug('wake up robot.')
+    print "==> wake up robot."
 
   def add_opcodes(self, opcodes):
     """Add available opcodes to the SCI."""
+    logging.debug('Add available opcodes to the SCI.')
+    print "==> Add available opcodes to the SCI. API :" + ('Create', 'Roomba')[opcodes == ROOMBA_OPCODES]
     self.opcodes.update(opcodes)
 
+  @abstractmethod
   def send(self, bytes):
     """send a string of bytes to the robot."""
-    with self.lock:
-      self.ser.write(struct.pack('B' * len(bytes), *bytes))
+    pass
 
-  #TODO: kwc the locking should be done at a higher level
+  @abstractmethod
   def read(self, num_bytes):
     """Read a string of 'num_bytes' bytes from the robot."""
-    logging.debug('Attempting to read %d bytes from SCI port.' % num_bytes)
-    with self.lock:
-      data = self.ser.read(num_bytes)
-    logging.debug('Read %d bytes from SCI port.' % len(data))
-    if not data:
-      raise DriverError('Error reading from SCI port. No data.')
-    if len(data) != num_bytes:
-      raise DriverError('Error reading from SCI port. Wrong data length.')
-    return data
+    pass
 
+  @abstractmethod
   def flush_input(self):
     """Flush input buffer, discarding all its contents."""
-    logging.debug('Flushing serial input buffer.')
-    self.ser.flushInput()
+    pass
 
   def __getattr__(self, name):
     """Turtlebots methods for opcodes on the fly.
@@ -271,6 +261,143 @@ class SerialCommandInterface(object):
       return send_opcode
     raise AttributeError
 
+class SerialCommandInterface(BaseCommandInterface):
+
+  """Serial Interface for Command Interfarce.
+
+  """
+
+  def __init__(self, tty, baudrate):
+    logging.info('Connect by Serial %s at %d', tty, baudrate)
+    self.ser = serial.Serial(tty, baudrate=baudrate, timeout=SERIAL_TIMEOUT)
+    super(SerialCommandInterface, self).__init__(tty, baudrate)
+
+  def wake(self):
+    super(SerialCommandInterface, self).wake()
+    self.ser.setRTS(0)
+    time.sleep(0.1)
+    self.ser.setRTS(1)
+    time.sleep(0.75)  # Technically it should wake after 500ms.
+    for i in range(3):
+      self.ser.setRTS(0)
+      time.sleep(0.25)
+      self.ser.setRTS(1)
+      time.sleep(0.25)
+
+  def send(self, bytes):
+    with self.lock:
+      self.ser.write(struct.pack('B' * len(bytes), *bytes))
+
+  #TODO: kwc the locking should be done at a higher level
+  def read(self, num_bytes):
+    logging.debug('Attempting to read %d bytes from SCI port.' % num_bytes)
+    with self.lock:
+      data = self.ser.read(num_bytes)
+    logging.debug('Read %d bytes from SCI port.' % len(data))
+    if not data:
+      raise DriverError('Error reading from SCI port. No data.')
+    if len(data) != num_bytes:
+      raise DriverError('Error reading from SCI port. Wrong data length.')
+    return data
+
+  def flush_input(self):
+    logging.debug('Flushing serial input buffer.')
+    self.ser.flushInput()
+    
+
+class WifiCommandInterface(BaseCommandInterface):
+
+  """Wifi Interface for Command Interfarce.
+
+  """
+
+  def __init__(self, ip, port):
+    logging.info('Connect by Wifi at %s:%d', ip, port)
+    self.soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.soc.settimeout(2)
+    self.soc.connect((ip , port)) # See more at: http://www.roowifi.com/sample-python-gtk/#sthash.nIjf68gl.dpuf
+    super(WifiCommandInterface, self).__init__(ip, port)
+
+  def wake(self):
+    super(WifiCommandInterface, self).wake()
+    time.sleep(0.1)
+
+  def send(self, bytes):
+    with self.lock:
+      data = struct.pack('B' * len(bytes), *bytes)
+      self.soc.sendall(data)
+    #print "==> Send a string of " + str(len(data)) + "/" + str(len(bytes)) + " byte(s) to the robot. " + str(bytes)
+
+  #TODO: kwc the locking should be done at a higher level
+  def read(self, num_bytes):
+    #logging.debug("Attempting to read " + str(num_bytes) + " bytes from SCI port.")
+    #print "==> Attempting to read " + str(num_bytes) + " bytes from SCI port."
+    buff = bytearray(num_bytes)
+    view = memoryview(buff)
+    toread = num_bytes
+    with self.lock:
+      while toread:
+        nbytes = self.soc.recv_into(view, toread/4, socket.MSG_WAITALL)
+        view = view[nbytes:]
+        toread -= nbytes
+    lengt = len(buff)
+    #print "=> reading " + str(lengt) + " bytes."
+    logging.debug('Read %d bytes from SCI port.' % lengt)
+    if not buff:
+      raise DriverError('Error reading from SCI port. No data.')
+    if lengt != (num_bytes):
+      raise DriverError('Error reading from SCI port. Wrong data length.')
+    return buff
+
+  def flush_input(self):
+    logging.debug('Flushing serial input buffer.')
+
+class BtCommandInterface(BaseCommandInterface):
+
+  """Bluetooth Interface for Command Interfarce.
+
+  """
+
+  def __init__(self, ip, port):
+    logging.info('Connect by Wifi at %s:%d', ip, port)
+    #self.bt = 
+    super(BtCommandInterface, self).__init__(ip, port)
+
+  def wake(self):
+    super(BtCommandInterface, self).wake()
+    time.sleep(0.1)
+
+  def send(self, bytes):
+    with self.lock:
+      data = struct.pack('B' * len(bytes), *bytes)
+      #self.bt.send(data)
+    #print "==> Send a string of " + str(len(data)) + "/" + str(len(bytes)) + " byte(s) to the robot. " + str(bytes)
+
+  #TODO: kwc the locking should be done at a higher level
+  def read(self, num_bytes):
+    #logging.debug("Attempting to read " + str(num_bytes) + " bytes from SCI port.")
+    #print "==> Attempting to read " + str(num_bytes) + " bytes from SCI port."
+    nbytes = 0
+    buff = bytearray(num_bytes)
+    view = memoryview(buff)
+    toread = num_bytes
+    with self.lock:
+      while toread:
+        #TODO map good implement !!!
+        #nbytes = self.soc.recv_into(view, toread/4, socket.MSG_WAITALL)
+        view = view[nbytes:]
+        toread -= nbytes
+    lengt = len(buff)
+    #print "=> reading " + str(lengt) + " bytes."
+    logging.debug('Read %d bytes from SCI port.' % lengt)
+    if not buff:
+      raise DriverError('Error reading from SCI port. No data.')
+    if lengt != (num_bytes):
+      raise DriverError('Error reading from SCI port. Wrong data length.')
+    return buff
+
+  def flush_input(self):
+    logging.debug('Flushing serial input buffer.')
 
 class Roomba(object):
 
@@ -283,7 +410,8 @@ class Roomba(object):
 
   def start(self, tty='/dev/ttyUSB0', baudrate=57600):
     self.tty = tty
-    self.sci = SerialCommandInterface(tty, baudrate)
+    #self.sci = SerialCommandInterface(tty, baudrate)
+    self.sci = WifiCommandInterface('192.168.0.30', 9001)
     self.sci.add_opcodes(ROOMBA_OPCODES)
   
   def change_baud_rate(self, baud_rate):
@@ -301,8 +429,11 @@ class Roomba(object):
     """
     if baud_rate not in BAUD_RATES:
       raise DriverError('Invalid baud rate specified.')
-    self.sci.baud(baud_rate)
-    self.sci = SerialCommandInterface(self.tty, baud_rate)
+    if self.sci is SerialCommandInterface:
+      self.sci.baud(baud_rate)
+      #self.sci = SerialCommandInterface(self.tty, baud_rate)
+    #else
+    #self.sci = WifiCommandInterface('192.168.0.30', 9001)
 
   def passive(self):
     """Put the robot in passive mode."""
