@@ -52,7 +52,12 @@ class TurtlebotGyro():
         self.gyro_scale_correction = rospy.get_param('~gyro_scale_correction', 1.35)
         self.imu_pub = rospy.Publisher('imu/data', sensor_msgs.msg.Imu, queue_size=10)
         self.imu_pub_raw = rospy.Publisher('imu/raw', sensor_msgs.msg.Imu, queue_size=10)
+        
+        self.android_imu_sub = rospy.Subscriber('android/imu', sensor_msgs.msg.Imu, self.imu_data)
 
+    def imu_data(self, msg):
+        self.android_imu_data = msg
+    
     def reconfigure(self, config, level): 
         self.gyro_measurement_range = config['gyro_measurement_range'] 
         self.gyro_scale_correction = config['gyro_scale_correction']
@@ -79,18 +84,20 @@ class TurtlebotGyro():
         dt = (current_time - last_time).to_sec()
         past_orientation = self.orientation
         self.imu_data.header.stamp =  sensor_state.header.stamp
-        self.imu_data.angular_velocity.z  = (float(sensor_state.user_analog_input)-self.cal_offset)/self.cal_offset*self.gyro_measurement_range*(math.pi/180.0)*self.gyro_scale_correction
+        self.imu_data.angular_velocity = self.android_imu_data.angular_velocity
+        ##self.imu_data.angular_velocity.z  = (float(sensor_state.user_analog_input)-self.cal_offset)/self.cal_offset*self.gyro_measurement_range*(math.pi/180.0)*self.gyro_scale_correction
         #sign change
-        self.imu_data.angular_velocity.z = -1.0*self.imu_data.angular_velocity.z
+        ##self.imu_data.angular_velocity.z = -1.0*self.imu_data.angular_velocity.z
         self.orientation += self.imu_data.angular_velocity.z * dt
         #print orientation
         (self.imu_data.orientation.x, self.imu_data.orientation.y, self.imu_data.orientation.z, self.imu_data.orientation.w) = PyKDL.Rotation.RotZ(self.orientation).GetQuaternion()
         self.imu_pub.publish(self.imu_data)
 
         self.imu_data.header.stamp =  sensor_state.header.stamp
-        self.imu_data.angular_velocity.z  = (float(sensor_state.user_analog_input)/self.gyro_measurement_range*(math.pi/180.0)*self.gyro_scale_correction)
+        self.imu_data.angular_velocity = self.android_imu_data.angular_velocity
+        ##self.imu_data.angular_velocity.z  = (float(sensor_state.user_analog_input)/self.gyro_measurement_range*(math.pi/180.0)*self.gyro_scale_correction)
         #sign change
-        self.imu_data.angular_velocity.z = -1.0*self.imu_data.angular_velocity.z
+        ##self.imu_data.angular_velocity.z = -1.0*self.imu_data.angular_velocity.z
         raw_orientation = past_orientation + self.imu_data.angular_velocity.z * dt
         #print orientation
         (self.imu_data.orientation.x, self.imu_data.orientation.y, self.imu_data.orientation.z, self.imu_data.orientation.w) = PyKDL.Rotation.RotZ(raw_orientation).GetQuaternion()
